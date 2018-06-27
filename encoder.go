@@ -23,17 +23,24 @@ package resp
 
 import (
 	"io"
-	"sync"
 )
 
 const digitbuflen = 20
 
+func init()  {
+	for i := 1; i < 128; i++{
+		tiniIntBytesMap[i] = intToBytes(i)
+	}
+}
+
 var (
-	encoderNil = []byte("$-1\r\n")
-	digits     = []byte("0123456789")
+	encoderNil      = []byte("$-1\r\n")
+	digits          = []byte("0123456789")
+	tiniIntBytesMap = make(map[int][]byte, 127)
+	bytePoolMgr		= NewBytePoolManager()
 )
 
-func intToBytes(v int) []byte {
+func intToBytesInner(v int) []byte {
 	buf := make([]byte, digitbuflen)
 
 	i := len(buf)
@@ -50,11 +57,17 @@ func intToBytes(v int) []byte {
 	return buf[i:]
 }
 
+func intToBytes(v int) []byte {
+	if v < 128 {
+		return tiniIntBytesMap[v]
+	}
+	return intToBytesInner(v)
+}
+
 // Encoder provides the Encode() method for encoding directly to an io.Writer.
 type Encoder struct {
 	w   io.Writer
 	buf []byte
-	mu  *sync.Mutex
 }
 
 // NewEncoder creates and returns a *Encoder value with the given io.Writer.
@@ -62,7 +75,6 @@ func NewEncoder(w io.Writer) *Encoder {
 	e := &Encoder{
 		w:   w,
 		buf: []byte{},
-		mu:  new(sync.Mutex),
 	}
 	return e
 }
@@ -76,15 +88,22 @@ func (e *Encoder) Encode(v interface{}) error {
 func (e *Encoder) writeEncoded(w io.Writer, data interface{}) (err error) {
 
 	var b []byte
+	var bb []byte
+
+	defer func() {
+		if bb != nil{
+			bytePoolMgr.Put(bb)
+		}
+	}()
 
 	switch v := data.(type) {
 
 	case []byte:
 		n := intToBytes(len(v))
 
-		b = make([]byte, 0, 1+len(n)+2+len(v)+2)
+		bb = bytePoolMgr.Get(countCommndLength(data))
 
-		b = append(b, BulkHeader)
+		b = append(bb, BulkHeader)
 		b = append(b, n...)
 		b = append(b, endOfLine...)
 		b = append(b, v...)
@@ -93,101 +112,88 @@ func (e *Encoder) writeEncoded(w io.Writer, data interface{}) (err error) {
 	case string:
 		q := []byte(v)
 
-		b = make([]byte, 0, 1+len(q)+2)
-		b = append(b, StringHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, StringHeader)
 		b = append(b, q...)
 		b = append(b, endOfLine...)
 
 	case error:
 		q := []byte(v.Error())
 
-		b = make([]byte, 0, 1+len(q)+2)
-		b = append(b, ErrorHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, ErrorHeader)
 		b = append(b, q...)
 		b = append(b, endOfLine...)
 
 	case int:
 		q := intToBytes(int(v))
-		b = make([]byte, 0, 1+len(q)+2)
-		b = append(b, IntegerHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, IntegerHeader)
 		b = append(b, q...)
 		b = append(b, endOfLine...)
 
 	case [][]byte:
 		n := intToBytes(len(v))
 
-		b = make([]byte, 0, 1+len(n)+2)
-		b = append(b, ArrayHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, ArrayHeader)
 		b = append(b, n...)
 		b = append(b, endOfLine...)
 
 		for i := range v {
 			q := intToBytes(len(v[i]))
 
-			z := make([]byte, 0, 1+len(q)+2+len(v[i])+2)
-
-			z = append(z, BulkHeader)
-			z = append(z, q...)
-			z = append(z, endOfLine...)
-			z = append(z, v[i]...)
-			z = append(z, endOfLine...)
-
-			b = append(b, z...)
+			b := append(b, BulkHeader)
+			b = append(b, q...)
+			b = append(b, endOfLine...)
+			b = append(b, v[i]...)
+			b = append(b, endOfLine...)
 		}
 
 	case []string:
 		q := intToBytes(len(v))
 
-		b = make([]byte, 0, 1+len(q)+2)
-		b = append(b, ArrayHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, ArrayHeader)
 		b = append(b, q...)
 		b = append(b, endOfLine...)
 
 		for i := range v {
 			p := []byte(v[i])
 
-			z := make([]byte, 0, 1+len(p)+2)
-			z = append(z, StringHeader)
-			z = append(z, p...)
-			z = append(z, endOfLine...)
-
-			b = append(b, z...)
+			b = append(b, StringHeader)
+			b = append(b, p...)
+			b = append(b, endOfLine...)
 		}
 
 	case []int:
 		n := intToBytes(len(v))
 
-		b = make([]byte, 0, 1+len(n)+2)
-		b = append(b, ArrayHeader)
+		bb = bytePoolMgr.Get(countCommndLength(data))
+		b = append(bb, ArrayHeader)
 		b = append(b, n...)
 		b = append(b, endOfLine...)
 
 		for i := range v {
 			m := intToBytes(v[i])
 
-			z := make([]byte, 0, 1+len(m)+2)
-			z = append(z, IntegerHeader)
-			z = append(z, m...)
-			z = append(z, endOfLine...)
-
-			b = append(b, z...)
+			b = append(b, IntegerHeader)
+			b = append(b, m...)
+			b = append(b, endOfLine...)
 		}
 
 	case []interface{}:
 		q := intToBytes(len(v))
-
-		b = make([]byte, 0, 1+len(q)+2)
-		b = append(b, ArrayHeader)
+		bb = bytePoolMgr.Get(1+len(q)+2)
+		b = append(bb, ArrayHeader)
 		b = append(b, q...)
 		b = append(b, endOfLine...)
 
 		e.buf = append(e.buf, b...)
 
 		if w != nil {
-			e.mu.Lock()
 			w.Write(e.buf)
 			e.buf = []byte{}
-			e.mu.Unlock()
 		}
 
 		for i := range v {
@@ -215,8 +221,7 @@ func (e *Encoder) writeEncoded(w io.Writer, data interface{}) (err error) {
 		}
 
 	case nil:
-		b = make([]byte, 0, len(encoderNil))
-		b = append(b, encoderNil...)
+		b = encoderNil
 
 	default:
 		return ErrInvalidInput
@@ -225,11 +230,61 @@ func (e *Encoder) writeEncoded(w io.Writer, data interface{}) (err error) {
 	e.buf = append(e.buf, b...)
 
 	if w != nil {
-		e.mu.Lock()
 		w.Write(e.buf)
 		e.buf = []byte{}
-		e.mu.Unlock()
 	}
 
 	return nil
+}
+
+func countCommndLength(data interface{}) int {
+	switch v := data.(type) {
+
+	case []byte:
+		n := intToBytes(len(v))
+		return 1+len(n)+2+len(v)+2
+
+	case string:
+		q := []byte(v)
+		return 1+len(q)+2
+
+	case error:
+		q := []byte(v.Error())
+		return 1+len(q)+2
+
+	case int:
+		q := intToBytes(int(v))
+		return 1+len(q)+2
+
+	case [][]byte:
+		n := intToBytes(len(v))
+		count := 1+len(n)+2
+		for i := range v {
+			q := intToBytes(len(v[i]))
+			count += 1 + len(q) + 2 + len(v[i]) + 2
+		}
+		return count
+
+	case []string:
+		q := intToBytes(len(v))
+		count :=1+len(q)+2
+		for i := range v {
+			p := []byte(v[i])
+			count += 1 + len(p) + 2
+		}
+		return count
+
+	case []int:
+		n := intToBytes(len(v))
+		count := 1+len(n)+2
+		for i := range v {
+			m := intToBytes(v[i])
+
+			count += 1 + len(m) + 2
+		}
+		return count
+
+	default:
+		return -1
+	}
 }
